@@ -66,6 +66,35 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * INTELLIGENT HTTP CACHING MIDDLEWARE
+ * Reduces bandwidth and improves perceived performance
+ * Cache headers are set per endpoint type
+ */
+app.use((req, res, next) => {
+  // Cache GET requests for read-only endpoints
+  if (req.method === 'GET') {
+    // Products, categories, banners - cache for long
+    if (req.path.match(/\/(products|categories|banners|settings|videos)\/?$/)) {
+      res.setHeader('Cache-Control', 'public, max-age=600'); // 10 minutes
+      res.setHeader('ETag', `"v1-${Date.now()}"`);
+    }
+    // User profile - cache shorter, must revalidate
+    else if (req.path.match(/\/auth\/me\/?$/)) {
+      res.setHeader('Cache-Control', 'private, max-age=300'); // 5 minutes
+      res.setHeader('ETag', `"user-${Date.now()}"`);
+    }
+    // Other GETs - moderate cache
+    else {
+      res.setHeader('Cache-Control', 'public, max-age=300'); // 5 minutes
+    }
+  } else {
+    // POST/PUT/DELETE - never cache
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 const SKIP_DB = process.env.SKIP_DB === 'true';
 
 if (!SKIP_DB) {
