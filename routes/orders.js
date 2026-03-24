@@ -371,8 +371,51 @@ const getShiprocketDefaults = () => ({
     height: Number(process.env.SHIPROCKET_DEFAULT_HEIGHT || 10),
 });
 
+const getPositiveNumber = (value, fallback) => {
+    const num = Number(value);
+    return Number.isFinite(num) && num > 0 ? num : fallback;
+};
+
+const getOrderPackageDetails = (order, defaults) => {
+    const items = Array.isArray(order.items) ? order.items : [];
+
+    if (items.length === 0) {
+        return defaults;
+    }
+
+    const packageTotals = items.reduce((acc, item) => {
+        const quantity = getPositiveNumber(item?.quantity, 1);
+        const packageDetails = item?.product?.packageDetails || {};
+
+        const itemWeight = getPositiveNumber(packageDetails.weight, defaults.weight);
+        const itemLength = getPositiveNumber(packageDetails.length, defaults.length);
+        const itemBreadth = getPositiveNumber(packageDetails.breadth, defaults.breadth);
+        const itemHeight = getPositiveNumber(packageDetails.height, defaults.height);
+
+        return {
+            weight: acc.weight + (itemWeight * quantity),
+            length: Math.max(acc.length, itemLength),
+            breadth: Math.max(acc.breadth, itemBreadth),
+            height: acc.height + (itemHeight * quantity),
+        };
+    }, {
+        weight: 0,
+        length: 0,
+        breadth: 0,
+        height: 0,
+    });
+
+    return {
+        weight: packageTotals.weight || defaults.weight,
+        length: packageTotals.length || defaults.length,
+        breadth: packageTotals.breadth || defaults.breadth,
+        height: packageTotals.height || defaults.height,
+    };
+};
+
 const buildShiprocketPayload = (order) => {
     const defaults = getShiprocketDefaults();
+    const packageDetails = getOrderPackageDetails(order, defaults);
     const shippingAddress = order.shippingAddress || {};
     const subTotal = Math.max(Number(order.total || 0) - Number(order.shippingCost || 0), 0);
 
@@ -407,10 +450,10 @@ const buildShiprocketPayload = (order) => {
         transaction_charges: 0,
         total_discount: Number(order.couponDiscount || 0),
         sub_total: Number(subTotal.toFixed(2)),
-        length: defaults.length,
-        breadth: defaults.breadth,
-        height: defaults.height,
-        weight: defaults.weight,
+        length: packageDetails.length,
+        breadth: packageDetails.breadth,
+        height: packageDetails.height,
+        weight: Number(packageDetails.weight.toFixed(3)),
     };
 };
 
@@ -734,7 +777,7 @@ router.get('/admin/all', adminAuth, async (req, res) => {
 
 router.post('/admin/:id/shiprocket/create', adminAuth, async (req, res) => {
     try {
-        const order = await Order.findById(req.params.id).populate('items.product', 'name slug');
+        const order = await Order.findById(req.params.id).populate('items.product', 'name slug packageDetails');
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }

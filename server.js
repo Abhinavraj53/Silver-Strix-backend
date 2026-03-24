@@ -159,6 +159,7 @@ const promoBlockRoutes = require('./routes/promoBlocks');
 const sectionVideoRoutes = require('./routes/sectionVideos');
 const attributeRoutes = require('./routes/attributes');
 const subscriberRoutes = require('./routes/subscribers');
+const shiprocketRoutes = require('./routes/shiprocket');
 
 // Use Routes
 app.use('/api/auth', authRoutes);
@@ -177,6 +178,7 @@ app.use('/api/promo-blocks', promoBlockRoutes);
 app.use('/api/section-videos', sectionVideoRoutes);
 app.use('/api/attributes', attributeRoutes);
 app.use('/api/newsletter', subscriberRoutes);
+app.use('/api/shiprocket', shiprocketRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

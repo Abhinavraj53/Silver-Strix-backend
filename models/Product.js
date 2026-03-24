@@ -60,6 +60,28 @@ const productSchema = new mongoose.Schema({
         type: Map,
         of: String
     },
+    packageDetails: {
+        weight: {
+            type: Number,
+            min: 0,
+            default: null
+        },
+        length: {
+            type: Number,
+            min: 0,
+            default: null
+        },
+        breadth: {
+            type: Number,
+            min: 0,
+            default: null
+        },
+        height: {
+            type: Number,
+            min: 0,
+            default: null
+        }
+    },
     attributeOptions: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Attribute'
