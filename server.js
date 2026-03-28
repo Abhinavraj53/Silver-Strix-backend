@@ -1,7 +1,11 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({
+  path: path.join(__dirname, '.env'),
+  override: true,
+});
 
 const app = express();
 
@@ -11,8 +15,10 @@ const corsOptions = {
     // Allowed origins - includes localhost for development and production URLs
     const allowedOrigins = [
       'http://localhost:5173',
+      'http://localhost:5174',
       'http://localhost:3000',
       'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174',
       'http://127.0.0.1:3000',
       'https://pujnam-store.onrender.com',
       'https://pujnam-store-frontend.onrender.com',
@@ -42,6 +48,8 @@ const corsOptions = {
   allowedHeaders: [
     'Content-Type',
     'Authorization',
+    'Cache-Control',
+    'Pragma',
     'X-Requested-With',
     'Accept',
     'Origin',
@@ -55,6 +63,7 @@ const corsOptions = {
 
 // Apply CORS middleware
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Body parser middleware
 app.use(express.json());
@@ -72,6 +81,15 @@ app.use((req, res, next) => {
  * Cache headers are set per endpoint type
  */
 app.use((req, res, next) => {
+  const hasAuthHeader = Boolean(req.headers.authorization);
+  const isProductRequest = req.path === '/api/products' || req.path.startsWith('/api/products/');
+  res.setHeader('Vary', 'Origin, Authorization');
+
+  if (hasAuthHeader || isProductRequest) {
+    res.setHeader('Cache-Control', 'no-store');
+    return next();
+  }
+
   // Cache GET requests for read-only endpoints
   if (req.method === 'GET') {
     // Products, categories, banners - cache for long
