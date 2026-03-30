@@ -41,6 +41,7 @@ const {
     // Account
     getAccountDetails,
     getWalletBalance,
+    getDiagnosticConfig,
     
     // NDR
     getNDROrders,
@@ -62,6 +63,7 @@ const requireAdmin = adminAuth;
 
 const sendShiprocketError = (res, error) => {
     const message = error?.message || 'Shiprocket request failed';
+    const statusCode = error?.statusCode;
 
     if (message.includes('Shiprocket is not configured')) {
         return res.status(503).json({ error: message });
@@ -73,6 +75,10 @@ const sendShiprocketError = (res, error) => {
         message.includes('Access forbidden')
     ) {
         return res.status(502).json({ error: message });
+    }
+
+    if (typeof statusCode === 'number' && statusCode >= 400) {
+        return res.status(statusCode).json({ error: message });
     }
 
     return res.status(400).json({ error: message });
@@ -292,6 +298,14 @@ router.get('/account', requireAdmin, async (req, res) => {
     try {
         const result = await getAccountDetails();
         res.json(result);
+    } catch (error) {
+        sendShiprocketError(res, error);
+    }
+});
+
+router.get('/debug-config', requireAdmin, async (req, res) => {
+    try {
+        res.json(getDiagnosticConfig());
     } catch (error) {
         sendShiprocketError(res, error);
     }

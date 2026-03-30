@@ -1,19 +1,65 @@
-const SHIPROCKET_BASE_URL = 'https://apiv2.shiprocket.in/v1/external';
+const DEFAULT_SHIPROCKET_BASE_URL = 'https://apiv2.shiprocket.in/v1/external';
 
 let tokenCache = {
     token: null,
     expiresAt: 0,
+    authData: null,
+};
+
+const getShiprocketBaseUrl = () => (
+    process.env.SHIPROCKET_API_URL ||
+    process.env.SHIPROCKET_BASE_URL ||
+    DEFAULT_SHIPROCKET_BASE_URL
+).trim().replace(/\/+$/, '');
+
+const readJsonResponse = async (response) => {
+    const text = await response.text();
+
+    if (!text) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(text);
+    } catch (error) {
+        return {
+            message: text,
+        };
+    }
 };
 
 const getCredentials = () => {
-    const email = (process.env.SHIPROCKET_EMAIL || process.env.SHIPROCKET_API_EMAIL || '').trim();
-    const password = (process.env.SHIPROCKET_PASSWORD || process.env.SHIPROCKET_API_PASSWORD || '').trim();
+    const email = (process.env.SHIPROCKET_API_EMAIL || process.env.SHIPROCKET_EMAIL || '').trim();
+    const password = (process.env.SHIPROCKET_API_PASSWORD || process.env.SHIPROCKET_PASSWORD || '').trim();
 
     if (!email || !password) {
-        throw new Error('Shiprocket is not configured. Set SHIPROCKET_EMAIL and SHIPROCKET_PASSWORD in backend/.env.');
+        throw new Error('Shiprocket is not configured. Set SHIPROCKET_API_EMAIL and SHIPROCKET_API_PASSWORD in backend/.env (or SHIPROCKET_EMAIL and SHIPROCKET_PASSWORD as fallback).');
     }
 
     return { email, password };
+};
+
+const maskEmail = (email) => {
+    if (!email || !email.includes('@')) return '';
+    const [local, domain] = email.split('@');
+    const safeLocal = local.length <= 3 ? `${local[0] || ''}***` : `${local.slice(0, 3)}***`;
+    return `${safeLocal}@${domain}`;
+};
+
+const getDiagnosticConfig = () => {
+    const email = (process.env.SHIPROCKET_API_EMAIL || process.env.SHIPROCKET_EMAIL || '').trim();
+    const password = (process.env.SHIPROCKET_API_PASSWORD || process.env.SHIPROCKET_PASSWORD || '').trim();
+
+    return {
+        emailMasked: maskEmail(email),
+        usingApiEmail: Boolean(process.env.SHIPROCKET_API_EMAIL),
+        usingApiPassword: Boolean(process.env.SHIPROCKET_API_PASSWORD),
+        usingFallbackEmail: !process.env.SHIPROCKET_API_EMAIL && Boolean(process.env.SHIPROCKET_EMAIL),
+        usingFallbackPassword: !process.env.SHIPROCKET_API_PASSWORD && Boolean(process.env.SHIPROCKET_PASSWORD),
+        passwordLength: password.length,
+        pickupLocation: (process.env.SHIPROCKET_PICKUP_LOCATION || '').trim(),
+        baseUrl: getShiprocketBaseUrl(),
+    };
 };
 
 const authenticate = async (forceRefresh = false) => {
@@ -22,7 +68,7 @@ const authenticate = async (forceRefresh = false) => {
     }
 
     const { email, password } = getCredentials();
-    const response = await fetch(`${SHIPROCKET_BASE_URL}/auth/login`, {
+    const response = await fetch(`${getShiprocketBaseUrl()}/auth/login`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -30,10 +76,10 @@ const authenticate = async (forceRefresh = false) => {
         body: JSON.stringify({ email, password }),
     });
 
-    const data = await response.json();
+    const data = await readJsonResponse(response);
     if (!response.ok || !data?.token) {
         if (response.status === 403) {
-            throw new Error('Shiprocket login was rejected with 403 Forbidden. Verify the Shiprocket email/password in backend/.env and confirm the same credentials can log in at app.shiprocket.in.');
+            throw new Error('Shiprocket login was rejected with 403 Forbidden. Use the Shiprocket API user credentials in backend/.env, not the main Shiprocket account login. Verify SHIPROCKET_API_EMAIL/SHIPROCKET_API_PASSWORD and confirm this API user is allowed for the configured IP in Shiprocket.');
         }
         throw new Error(data?.message || 'Failed to authenticate with Shiprocket.');
     }
@@ -41,6 +87,7 @@ const authenticate = async (forceRefresh = false) => {
     tokenCache = {
         token: data.token,
         expiresAt: Date.now() + (8 * 60 * 1000),
+        authData: data,
     };
 
     return data.token;
@@ -48,7 +95,7 @@ const authenticate = async (forceRefresh = false) => {
 
 const shiprocketRequest = async (path, options = {}, retry = true) => {
     const token = await authenticate(false);
-    const response = await fetch(`${SHIPROCKET_BASE_URL}${path}`, {
+    const response = await fetch(`${getShiprocketBaseUrl()}${path}`, {
         ...options,
         headers: {
             'Content-Type': 'application/json',
@@ -57,12 +104,7 @@ const shiprocketRequest = async (path, options = {}, retry = true) => {
         },
     });
 
-    let data = null;
-    try {
-        data = await response.json();
-    } catch (error) {
-        data = null;
-    }
+    const data = await readJsonResponse(response);
 
     if (response.status === 401 && retry) {
         await authenticate(true);
@@ -70,10 +112,40 @@ const shiprocketRequest = async (path, options = {}, retry = true) => {
     }
 
     if (!response.ok) {
-        throw new Error(data?.message || data?.error || `Shiprocket request failed with status ${response.status}`);
+        const error = new Error(data?.message || data?.error || `Shiprocket request failed with status ${response.status}`);
+        error.statusCode = response.status;
+        error.payload = data;
+        throw error;
     }
 
     return data;
+};
+
+const appendServiceabilityParam = (params, key, value) => {
+    if (value === undefined || value === null || value === '') {
+        return;
+    }
+
+    params.append(key, String(value));
+};
+
+const buildServiceabilityPath = (payload = {}) => {
+    const params = new URLSearchParams();
+
+    appendServiceabilityParam(params, 'pickup_postcode', payload.pickup_postcode);
+    appendServiceabilityParam(params, 'delivery_postcode', payload.delivery_postcode);
+    appendServiceabilityParam(params, 'cod', payload.cod);
+    appendServiceabilityParam(params, 'weight', payload.weight);
+    appendServiceabilityParam(params, 'length', payload.length);
+    appendServiceabilityParam(params, 'breadth', payload.breadth);
+    appendServiceabilityParam(params, 'height', payload.height);
+    appendServiceabilityParam(params, 'declared_value', payload.declared_value);
+    appendServiceabilityParam(params, 'is_return', payload.is_return);
+    appendServiceabilityParam(params, 'courier_id', payload.courier_id);
+    appendServiceabilityParam(params, 'mode', payload.mode || 'Surface');
+
+    const queryString = params.toString();
+    return `/courier/serviceability${queryString ? `?${queryString}` : ''}`;
 };
 
 // ==================== ORDER MANAGEMENT ====================
@@ -179,26 +251,30 @@ const trackByShipmentId = async (shipmentId) => {
 
 // ==================== COURIERS ====================
 const getCouriers = async () => {
-    const response = await shiprocketRequest('/couriers', {
-        method: 'GET',
-    });
-    // Extract array from response - Shiprocket returns { data: [...couriers...] }
-    return Array.isArray(response) ? response : (response?.data || response?.couriers || []);
+    try {
+        const response = await shiprocketRequest('/couriers', {
+            method: 'GET',
+        });
+        // Extract array from response - Shiprocket returns { data: [...couriers...] }
+        return Array.isArray(response) ? response : (response?.data || response?.couriers || []);
+    } catch (error) {
+        if (error?.statusCode === 404) {
+            return [];
+        }
+        throw error;
+    }
 };
 
 const getAvailableCouriers = async (payload) => {
-    return shiprocketRequest('/courier/serviceability', {
-        method: 'POST',
-        body: JSON.stringify(payload),
+    return shiprocketRequest(buildServiceabilityPath(payload), {
+        method: 'GET',
     });
 };
 
 const getCourierIntegrations = async () => {
-    const response = await shiprocketRequest('/courier/integrations', {
-        method: 'GET',
-    });
-    // Extract array from response - Shiprocket returns { data: [...couriers...] }
-    return Array.isArray(response) ? response : (response?.data || response?.courier || []);
+    // Shiprocket currently returns 404 for /courier/integrations on this account.
+    // Keep the dashboard operational by returning an empty list instead of failing hard.
+    return [];
 };
 
 // ==================== LABELS & MANIFESTS ====================
@@ -227,12 +303,43 @@ const downloadLabel = async (shipmentId) => {
 };
 
 // ==================== PICKUP ADDRESSES ====================
+const normalizePickupAddresses = (response) => {
+    const shippingAddresses = response?.data?.shipping_address;
+    if (Array.isArray(shippingAddresses)) {
+        return shippingAddresses;
+    }
+
+    if (Array.isArray(response)) {
+        return response;
+    }
+
+    if (Array.isArray(response?.data)) {
+        return response.data;
+    }
+
+    if (Array.isArray(response?.addresses)) {
+        return response.addresses;
+    }
+
+    return [];
+};
+
 const getPickupAddresses = async () => {
-    const response = await shiprocketRequest('/pickup_addresses', {
-        method: 'GET',
-    });
-    // Extract array from response - Shiprocket returns { data: [...addresses...] }
-    return Array.isArray(response) ? response : (response?.data || response?.addresses || []);
+    try {
+        const response = await shiprocketRequest('/pickup_addresses', {
+            method: 'GET',
+        });
+        return normalizePickupAddresses(response);
+    } catch (error) {
+        if (error?.statusCode !== 404) {
+            throw error;
+        }
+
+        const fallbackResponse = await shiprocketRequest('/settings/company/pickup', {
+            method: 'GET',
+        });
+        return normalizePickupAddresses(fallbackResponse);
+    }
 };
 
 const createPickupAddress = async (payload) => {
@@ -257,23 +364,45 @@ const deletePickupAddress = async (addressId) => {
 
 // ==================== SHIPPING RATES ====================
 const getShippingRates = async (payload) => {
-    return shiprocketRequest('/courier/serviceability', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
+    return getAvailableCouriers(payload);
 };
 
 // ==================== ACCOUNT & SETTINGS ====================
 const getAccountDetails = async () => {
-    return shiprocketRequest('/account', {
-        method: 'GET',
-    });
+    await authenticate(false);
+
+    const authData = tokenCache.authData || {};
+    const pickupAddresses = await getPickupAddresses();
+
+    return {
+        id: authData.id || null,
+        company_id: authData.company_id || null,
+        email: authData.email || null,
+        first_name: authData.first_name || null,
+        last_name: authData.last_name || null,
+        business_type: authData.business_type || 'Shiprocket',
+        status: authData.token ? 'connected' : 'unknown',
+        pickup_locations_count: pickupAddresses.length,
+        pickup_locations: pickupAddresses.map((address) => ({
+            id: address?.id || null,
+            pickup_location: address?.pickup_location || address?.warehouse_name || null,
+            city: address?.city || null,
+            state: address?.state || null,
+        })),
+        source: 'shiprocket-auth-login',
+    };
 };
 
 const getWalletBalance = async () => {
-    return shiprocketRequest('/account/wallet', {
-        method: 'GET',
-    });
+    // Shiprocket currently returns 404 for /account/wallet on this account.
+    // Return a non-failing placeholder payload so the dashboard remains usable.
+    return {
+        balance: 0,
+        available_balance: 0,
+        unsupported: true,
+        message: 'Wallet balance endpoint is not exposed by the current Shiprocket API response for this account.',
+        source: 'shiprocket-wallet-fallback',
+    };
 };
 
 // ==================== NDR (Non-Delivery Reports) ====================
@@ -283,11 +412,18 @@ const getNDROrders = async (filters = {}) => {
     if (filters.offset) params.append('offset', filters.offset);
     
     const queryString = params.toString();
-    const response = await shiprocketRequest(`/ndr${queryString ? '?' + queryString : ''}`, {
-        method: 'GET',
-    });
-    // Extract array from response - Shiprocket returns { data: [...ndr...] }
-    return Array.isArray(response) ? response : (response?.data || response?.ndr || []);
+    try {
+        const response = await shiprocketRequest(`/ndr${queryString ? '?' + queryString : ''}`, {
+            method: 'GET',
+        });
+        // Extract array from response - Shiprocket returns { data: [...ndr...] }
+        return Array.isArray(response) ? response : (response?.data || response?.ndr || []);
+    } catch (error) {
+        if (error?.statusCode === 404) {
+            return [];
+        }
+        throw error;
+    }
 };
 
 const updateNDRResolution = async (awbCode, resolution) => {
@@ -331,6 +467,7 @@ const bulkGeneratePickup = async (shipmentIds) => {
 };
 
 module.exports = {
+    getDiagnosticConfig,
     // Orders
     createAdhocOrder,
     getOrders,
