@@ -57,9 +57,22 @@ const {
 } = require('../utils/shiprocket');
 
 const router = express.Router();
+const SHIPROCKET_MAINTENANCE_MESSAGE = 'Shiprocket is under maintenance right now. Please process shipments manually for the time being.';
+const isShiprocketDisabled = () => process.env.SHIPROCKET_DISABLED === 'true';
 
 // Middleware to check admin auth
 const requireAdmin = adminAuth;
+
+router.use((req, res, next) => {
+    if (isShiprocketDisabled()) {
+        return res.status(503).json({
+            error: SHIPROCKET_MAINTENANCE_MESSAGE,
+            maintenance: true,
+        });
+    }
+
+    next();
+});
 
 const sendShiprocketError = (res, error) => {
     const message = error?.message || 'Shiprocket request failed';

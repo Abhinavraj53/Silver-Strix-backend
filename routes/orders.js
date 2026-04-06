@@ -10,6 +10,8 @@ const { sendEmail } = require('../utils/emailService');
 const { createAdhocOrder, assignAwb, generatePickup, trackByAwb } = require('../utils/shiprocket');
 
 const router = express.Router();
+const SHIPROCKET_MAINTENANCE_MESSAGE = 'Shiprocket is under maintenance right now. Please process shipments manually for the time being.';
+const isShiprocketDisabled = () => process.env.SHIPROCKET_DISABLED === 'true';
 
 const generateVerificationCode = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
@@ -213,6 +215,26 @@ const getCashfreeClient = () => {
     return cashfreeClient;
 };
 
+const getFrontendBaseUrl = (req) => {
+    const configuredFrontendUrl = String(process.env.FRONTEND_URL || '').trim();
+    if (configuredFrontendUrl) {
+        return configuredFrontendUrl.replace(/\/+$/, '');
+    }
+
+    const requestOrigin = String(req.headers.origin || '').trim();
+    if (requestOrigin) {
+        return requestOrigin.replace(/\/+$/, '');
+    }
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim();
+    const forwardedHost = String(req.headers['x-forwarded-host'] || '').trim();
+    if (forwardedProto && forwardedHost) {
+        return `${forwardedProto}://${forwardedHost}`.replace(/\/+$/, '');
+    }
+
+    return 'http://localhost:5174';
+};
+
 const getRequestUser = async (req) => {
     let userId = null;
     let userEmail = null;
@@ -358,6 +380,14 @@ const finalizePaidOrder = async (order) => {
         }
     }
 
+    if (!isShiprocketDisabled()) {
+        try {
+            await attemptAutoShiprocketSync(order._id || order.id, 'finalize-paid-order');
+        } catch (shiprocketError) {
+            console.error('Auto Shiprocket sync failed:', shiprocketError.message || shiprocketError);
+        }
+    }
+
     return order;
 };
 
@@ -418,12 +448,12 @@ const buildShiprocketPayload = (order) => {
     const packageDetails = getOrderPackageDetails(order, defaults);
     const shippingAddress = order.shippingAddress || {};
     const subTotal = Math.max(Number(order.total || 0) - Number(order.shippingCost || 0), 0);
+    const configuredChannelId = (process.env.SHIPROCKET_CHANNEL_ID || '').trim();
 
     return {
         order_id: `silver-strix-${order._id.toString().slice(-10)}`,
         order_date: new Date(order.createdAt || Date.now()).toISOString().slice(0, 19).replace('T', ' '),
         pickup_location: defaults.pickupLocation,
-        channel_id: '',
         comment: order.notes || '',
         billing_customer_name: shippingAddress.name || 'Customer',
         billing_last_name: '',
@@ -435,7 +465,8 @@ const buildShiprocketPayload = (order) => {
         billing_country: 'India',
         billing_email: shippingAddress.email || '',
         billing_phone: shippingAddress.phone || '',
-        shipping_is_billing: true,
+        shipping_is_billing: 1,
+        ...(configuredChannelId ? { channel_id: configuredChannelId } : {}),
         order_items: (order.items || []).map((item, index) => ({
             name: item.name || item.product?.name || `Item ${index + 1}`,
             sku: String(item.product?._id || item.product || `item-${index + 1}`),
@@ -455,6 +486,119 @@ const buildShiprocketPayload = (order) => {
         height: packageDetails.height,
         weight: Number(packageDetails.weight.toFixed(3)),
     };
+};
+
+const attemptAutoShiprocketSync = async (orderId, trigger = 'system') => {
+    if (isShiprocketDisabled()) {
+        return { skipped: true, reason: 'shiprocket-under-maintenance' };
+    }
+
+    if (!orderId) {
+        return { skipped: true, reason: 'missing-order-id' };
+    }
+
+    const order = await Order.findById(orderId).populate('items.product', 'name slug packageDetails');
+    if (!order) {
+        return { skipped: true, reason: 'order-not-found' };
+    }
+
+    if (order.orderStatus === 'cancelled') {
+        return { skipped: true, reason: 'cancelled-order' };
+    }
+
+    if (!['confirmed', 'processing'].includes(order.orderStatus)) {
+        return { skipped: true, reason: `status-${order.orderStatus || 'unknown'}-not-eligible` };
+    }
+
+    if (order.shiprocketShipmentId) {
+        return { skipped: true, reason: 'shipment-already-exists', order };
+    }
+
+    if (!order.shippingAddress?.street || !order.shippingAddress?.city || !order.shippingAddress?.state || !order.shippingAddress?.zipCode || !order.shippingAddress?.phone || !order.shippingAddress?.email) {
+        return { skipped: true, reason: 'missing-shipping-address', order };
+    }
+
+    const createResponse = await createAdhocOrder(buildShiprocketPayload(order));
+
+    order.shippingProvider = 'shiprocket';
+    order.shiprocketOrderId = String(
+        createResponse?.order_id ||
+        createResponse?.order_details?.order_id ||
+        createResponse?.data?.order_id ||
+        ''
+    ) || null;
+    order.shiprocketShipmentId = Number(
+        createResponse?.shipment_id ||
+        createResponse?.shipment_details?.shipment_id ||
+        createResponse?.data?.shipment_id ||
+        0
+    ) || null;
+    order.orderStatus = ['pending', 'confirmed'].includes(order.orderStatus) ? 'processing' : order.orderStatus;
+
+    if (order.shiprocketShipmentId) {
+        try {
+            const awbResponse = await assignAwb({ shipmentId: order.shiprocketShipmentId });
+            const awbCode = String(
+                awbResponse?.response?.data?.awb_code ||
+                awbResponse?.awb_code ||
+                awbResponse?.data?.awb_code ||
+                ''
+            ) || '';
+            order.shiprocketAwbCode = awbCode || order.shiprocketAwbCode;
+            order.shiprocketCourierName =
+                awbResponse?.response?.data?.courier_name ||
+                awbResponse?.courier_name ||
+                awbResponse?.data?.courier_name ||
+                order.shiprocketCourierName;
+
+            if (awbCode) {
+                order.shiprocketTrackingStatus = 'awb_assigned';
+                order.shiprocketTrackingPayload = {
+                    ...(order.shiprocketTrackingPayload || {}),
+                    lastSyncTrigger: trigger,
+                    awbAssignment: awbResponse,
+                };
+            } else {
+                order.shiprocketTrackingStatus = 'awb_pending';
+                order.shiprocketTrackingPayload = {
+                    ...(order.shiprocketTrackingPayload || {}),
+                    lastSyncTrigger: trigger,
+                    awbAssignment: awbResponse,
+                    syncNote: 'Shipment created but AWB was not assigned yet, so pickup was skipped.',
+                };
+            }
+        } catch (awbError) {
+            console.warn(`Shiprocket AWB assignment failed (${trigger}):`, awbError.message);
+            order.shiprocketTrackingStatus = 'awb_pending';
+            order.shiprocketTrackingPayload = {
+                ...(order.shiprocketTrackingPayload || {}),
+                lastSyncTrigger: trigger,
+                awbAssignmentError: awbError.message || 'AWB assignment failed',
+                syncNote: 'Shipment created but AWB assignment failed, so pickup was skipped.',
+            };
+        }
+
+        if (order.shiprocketAwbCode) {
+            try {
+                const pickupResponse = await generatePickup({ shipmentId: order.shiprocketShipmentId });
+                order.shiprocketTrackingPayload = {
+                    ...(order.shiprocketTrackingPayload || {}),
+                    lastSyncTrigger: trigger,
+                    pickupGeneration: pickupResponse,
+                };
+            } catch (pickupError) {
+                console.warn(`Shiprocket pickup generation failed (${trigger}):`, pickupError.message);
+                order.shiprocketTrackingPayload = {
+                    ...(order.shiprocketTrackingPayload || {}),
+                    lastSyncTrigger: trigger,
+                    pickupGenerationError: pickupError.message || 'Pickup generation failed',
+                };
+            }
+        }
+    }
+
+    await order.save();
+    return { skipped: false, order, createResponse };
 };
 
 const deriveShiprocketStatus = (trackingData) => {
@@ -542,6 +686,7 @@ router.post('/payment-session', async (req, res) => {
         await order.save();
 
         const cashfreeOrderId = createCashfreeOrderId(order._id);
+        const returnUrl = `${getFrontendBaseUrl(req)}/checkout?cashfree=return&order_id=${order._id.toString()}`;
         const customerPhone = (orderPayload.shippingAddress.phone || '').replace(/\D/g, '').slice(-10);
         const client = getCashfreeClient();
         const response = await client.PGCreateOrder({
@@ -555,7 +700,8 @@ router.post('/payment-session', async (req, res) => {
                 customer_phone: customerPhone || '9999999999'
             },
             order_meta: {
-                payment_methods: paymentMethod === 'upi' ? 'upi' : 'cc,dc,upi'
+                payment_methods: paymentMethod === 'upi' ? 'upi' : 'cc,dc,upi',
+                return_url: returnUrl
             },
             order_note: notes || `Silver Strix order ${order._id.toString().slice(-8)}`
         });
@@ -568,7 +714,8 @@ router.post('/payment-session', async (req, res) => {
             message: 'Payment session created successfully',
             order,
             paymentSessionId: response.data.payment_session_id,
-            paymentGatewayOrderId: response.data.order_id
+            paymentGatewayOrderId: response.data.order_id,
+            returnUrl
         });
     } catch (error) {
         console.error('Payment session creation error:', error);
@@ -698,13 +845,7 @@ router.post('/', async (req, res) => {
 
         await order.save();
 
-        await finalizePaidOrder({
-            ...order.toObject(),
-            items: order.items,
-            shippingAddress: order.shippingAddress,
-            user: order.user,
-            couponCode: order.couponCode
-        });
+        await finalizePaidOrder(order);
 
         res.status(201).json({ message: 'Order placed successfully', order });
     } catch (error) {
@@ -777,67 +918,28 @@ router.get('/admin/all', adminAuth, async (req, res) => {
 
 router.post('/admin/:id/shiprocket/create', adminAuth, async (req, res) => {
     try {
-        const order = await Order.findById(req.params.id).populate('items.product', 'name slug packageDetails');
-        if (!order) {
+        if (isShiprocketDisabled()) {
+            return res.status(503).json({ error: SHIPROCKET_MAINTENANCE_MESSAGE, maintenance: true });
+        }
+
+        const result = await attemptAutoShiprocketSync(req.params.id, 'admin-manual-create');
+        if (result.reason === 'order-not-found') {
             return res.status(404).json({ error: 'Order not found' });
         }
-
-        if (order.orderStatus === 'cancelled') {
+        if (result.reason === 'cancelled-order') {
             return res.status(400).json({ error: 'Cancelled orders cannot be shipped via Shiprocket.' });
         }
-
-        if (!order.shippingAddress?.street || !order.shippingAddress?.city || !order.shippingAddress?.state || !order.shippingAddress?.zipCode || !order.shippingAddress?.phone || !order.shippingAddress?.email) {
+        if (result.reason === 'missing-shipping-address') {
             return res.status(400).json({ error: 'Order is missing required shipping address details for Shiprocket.' });
         }
-
-        if (order.shiprocketShipmentId) {
-            return res.json({ message: 'Shiprocket shipment already exists for this order.', order });
+        if (result.reason === 'shipment-already-exists') {
+            return res.json({ message: 'Shiprocket shipment already exists for this order.', order: result.order });
+        }
+        if (result.skipped) {
+            return res.status(400).json({ error: `Order is not ready for Shiprocket sync yet (${result.reason}).` });
         }
 
-        const createResponse = await createAdhocOrder(buildShiprocketPayload(order));
-
-        order.shippingProvider = 'shiprocket';
-        order.shiprocketOrderId = String(
-            createResponse?.order_id ||
-            createResponse?.order_details?.order_id ||
-            createResponse?.data?.order_id ||
-            ''
-        ) || null;
-        order.shiprocketShipmentId = Number(
-            createResponse?.shipment_id ||
-            createResponse?.shipment_details?.shipment_id ||
-            createResponse?.data?.shipment_id ||
-            0
-        ) || null;
-        order.orderStatus = ['pending', 'confirmed'].includes(order.orderStatus) ? 'processing' : order.orderStatus;
-
-        if (order.shiprocketShipmentId) {
-            try {
-                const awbResponse = await assignAwb({ shipmentId: order.shiprocketShipmentId });
-                order.shiprocketAwbCode = String(
-                    awbResponse?.response?.data?.awb_code ||
-                    awbResponse?.awb_code ||
-                    awbResponse?.data?.awb_code ||
-                    ''
-                ) || order.shiprocketAwbCode;
-                order.shiprocketCourierName =
-                    awbResponse?.response?.data?.courier_name ||
-                    awbResponse?.courier_name ||
-                    awbResponse?.data?.courier_name ||
-                    order.shiprocketCourierName;
-            } catch (awbError) {
-                console.warn('Shiprocket AWB assignment failed:', awbError.message);
-            }
-
-            try {
-                await generatePickup({ shipmentId: order.shiprocketShipmentId });
-            } catch (pickupError) {
-                console.warn('Shiprocket pickup generation failed:', pickupError.message);
-            }
-        }
-
-        await order.save();
-        res.json({ message: 'Shiprocket shipment created successfully.', order });
+        res.json({ message: 'Shiprocket shipment created successfully.', order: result.order });
     } catch (error) {
         console.error('Shiprocket shipment creation error:', error);
         res.status(500).json({ error: error.message || 'Failed to create Shiprocket shipment' });
@@ -846,6 +948,10 @@ router.post('/admin/:id/shiprocket/create', adminAuth, async (req, res) => {
 
 router.get('/admin/:id/shiprocket/track', adminAuth, async (req, res) => {
     try {
+        if (isShiprocketDisabled()) {
+            return res.status(503).json({ error: SHIPROCKET_MAINTENANCE_MESSAGE, maintenance: true });
+        }
+
         const order = await Order.findById(req.params.id);
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
@@ -880,18 +986,40 @@ router.get('/admin/:id/shiprocket/track', adminAuth, async (req, res) => {
 router.put('/admin/:id/status', adminAuth, async (req, res) => {
     try {
         const { orderStatus, paymentStatus } = req.body;
-
-        const order = await Order.findByIdAndUpdate(
-            req.params.id,
-            { orderStatus, paymentStatus },
-            { new: true }
-        );
+        const order = await Order.findById(req.params.id);
 
         if (!order) {
             return res.status(404).json({ error: 'Order not found' });
         }
 
-        res.json({ message: 'Order status updated', order });
+        const previousStatus = order.orderStatus;
+        if (orderStatus !== undefined) {
+            order.orderStatus = orderStatus;
+        }
+        if (paymentStatus !== undefined) {
+            order.paymentStatus = paymentStatus;
+        }
+        await order.save();
+
+        let shiprocketSync = null;
+        if (
+            !isShiprocketDisabled() &&
+            !order.shiprocketShipmentId &&
+            order.orderStatus === 'confirmed' &&
+            previousStatus !== 'confirmed'
+        ) {
+            try {
+                shiprocketSync = await attemptAutoShiprocketSync(order._id, 'admin-status-update');
+            } catch (shiprocketError) {
+                shiprocketSync = {
+                    skipped: true,
+                    reason: shiprocketError.message || 'shiprocket-sync-failed'
+                };
+            }
+        }
+
+        const freshOrder = await Order.findById(req.params.id);
+        res.json({ message: 'Order status updated', order: freshOrder, shiprocketSync });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
