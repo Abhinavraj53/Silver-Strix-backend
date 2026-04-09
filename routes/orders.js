@@ -91,7 +91,7 @@ const buildInvoiceHtml = async (order, options = {}) => {
     const Settings = require('../models/Settings');
     const storeSettings = await Settings.getSettings();
     const storeName = storeSettings.storeName || 'Silver Strix';
-    const logoUrl = storeSettings.headerLogo || storeSettings.logo || '';
+    const logoUrl = storeSettings.footerLogo || storeSettings.headerLogo || storeSettings.logo || '';
     const legalBusinessName = storeSettings.legalBusinessName || storeName;
     const orderLabel = order?.order_number || order?._id?.toString()?.slice(-8) || 'N/A';
     const invoiceNumber = `INV-${String(orderLabel).toUpperCase()}`;
@@ -133,7 +133,11 @@ const buildInvoiceHtml = async (order, options = {}) => {
     ].filter(Boolean).join('<br>');
 
     const showActions = options.showActions !== false;
+    const compactMode = options.compactMode === true;
     const styles = `
+                @page {
+                    size: A4;
+                }
                 :root {
                     --primary: #4A2C2A;
                     --accent: #C2A878;
@@ -175,9 +179,10 @@ const buildInvoiceHtml = async (order, options = {}) => {
                     align-items: center;
                 }
                 .brand-logo {
-                    width: 78px;
-                    height: 78px;
-                    border-radius: 20px;
+                    width: 118px;
+                    height: 94px;
+                    padding: 12px;
+                    border-radius: 24px;
                     background: rgba(255,255,255,0.08);
                     border: 1px solid rgba(255,255,255,0.18);
                     display: flex;
@@ -187,9 +192,13 @@ const buildInvoiceHtml = async (order, options = {}) => {
                     flex-shrink: 0;
                 }
                 .brand-logo img {
-                    width: 100%;
-                    height: 100%;
+                    width: auto;
+                    height: auto;
+                    max-width: 100%;
+                    max-height: 100%;
                     object-fit: contain;
+                    object-position: center center;
+                    display: block;
                 }
                 .brand-copy h1 {
                     margin: 0;
@@ -354,6 +363,116 @@ const buildInvoiceHtml = async (order, options = {}) => {
                     text-align: center;
                     line-height: 1.7;
                 }
+                .invoice.compact {
+                    max-width: 100%;
+                    border-radius: 18px;
+                    box-shadow: none;
+                }
+                .invoice.compact .header {
+                    gap: 18px;
+                    padding: 22px 24px;
+                }
+                .invoice.compact .brand {
+                    gap: 14px;
+                }
+                .invoice.compact .brand-logo {
+                    width: 92px;
+                    height: 74px;
+                    padding: 10px;
+                    border-radius: 18px;
+                }
+                .invoice.compact .brand-copy h1 {
+                    font-size: 26px;
+                }
+                .invoice.compact .brand-copy p {
+                    margin-top: 6px;
+                    max-width: 340px;
+                    font-size: 12px;
+                    line-height: 1.45;
+                }
+                .invoice.compact .invoice-meta {
+                    min-width: 220px;
+                    padding: 14px 16px;
+                    border-radius: 16px;
+                }
+                .invoice.compact .invoice-meta h2 {
+                    margin-bottom: 10px;
+                    font-size: 18px;
+                }
+                .invoice.compact .meta-row {
+                    gap: 10px;
+                    font-size: 12px;
+                    padding: 4px 0;
+                }
+                .invoice.compact .content {
+                    padding: 22px 24px;
+                }
+                .invoice.compact .top-grid {
+                    gap: 14px;
+                }
+                .invoice.compact .card,
+                .invoice.compact .note-box,
+                .invoice.compact .totals,
+                .invoice.compact .table-wrap {
+                    border-radius: 16px;
+                }
+                .invoice.compact .card,
+                .invoice.compact .note-box,
+                .invoice.compact .totals {
+                    padding: 16px 18px;
+                }
+                .invoice.compact .eyebrow {
+                    margin-bottom: 6px;
+                    font-size: 11px;
+                    letter-spacing: 0.18em;
+                }
+                .invoice.compact .card p,
+                .invoice.compact .note-box,
+                .invoice.compact .totals-row {
+                    font-size: 12px;
+                    line-height: 1.5;
+                }
+                .invoice.compact .table-wrap {
+                    margin-top: 16px;
+                }
+                .invoice.compact th,
+                .invoice.compact td {
+                    padding: 10px 12px;
+                    font-size: 12px;
+                }
+                .invoice.compact th {
+                    font-size: 10px;
+                    letter-spacing: 0.14em;
+                }
+                .invoice.compact .summary {
+                    margin-top: 16px;
+                    gap: 16px;
+                }
+                .invoice.compact .totals-row {
+                    padding: 5px 0;
+                }
+                .invoice.compact .totals-row.total {
+                    margin-top: 6px;
+                    padding-top: 10px;
+                    font-size: 16px;
+                }
+                .invoice.compact .footer {
+                    padding: 14px 24px 18px 24px;
+                    font-size: 11px;
+                    line-height: 1.45;
+                }
+                .invoice.compact .header,
+                .invoice.compact .top-grid,
+                .invoice.compact .table-wrap,
+                .invoice.compact .summary,
+                .invoice.compact .footer {
+                    break-inside: avoid;
+                    page-break-inside: avoid;
+                }
+                body.compact-page {
+                    background: #ffffff;
+                    padding: 0;
+                }
                 @media print {
                     body {
                         background: #ffffff;
@@ -394,7 +513,7 @@ const buildInvoiceHtml = async (order, options = {}) => {
     `;
 
     const markup = `
-            <div class="invoice">
+            <div class="invoice${compactMode ? ' compact' : ''}">
                 <div class="header">
                     <div class="brand">
                         <div class="brand-logo">
@@ -500,7 +619,7 @@ const buildInvoiceHtml = async (order, options = {}) => {
             <title>${escapeHtml(storeName)} Invoice ${escapeHtml(orderLabel)}</title>
             <style>${styles}</style>
         </head>
-        <body>
+        <body class="${compactMode ? 'compact-page' : ''}">
             ${markup}
         </body>
         </html>
@@ -508,7 +627,11 @@ const buildInvoiceHtml = async (order, options = {}) => {
 };
 
 const generateInvoicePdfBuffer = async (order) => {
-    const html = await buildInvoiceHtml(order, { showActions: false, fullDocument: true });
+    const html = await buildInvoiceHtml(order, {
+        showActions: false,
+        fullDocument: true,
+        compactMode: true,
+    });
     const browser = await puppeteer.launch({
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -517,16 +640,17 @@ const generateInvoicePdfBuffer = async (order) => {
     try {
         const page = await browser.newPage();
         await page.setContent(html, { waitUntil: 'networkidle0' });
-        await page.emulateMediaType('screen');
+        await page.emulateMediaType('print');
 
         const pdfBytes = await page.pdf({
             format: 'A4',
             printBackground: true,
+            scale: 0.94,
             margin: {
-                top: '12mm',
-                right: '10mm',
-                bottom: '12mm',
-                left: '10mm',
+                top: '8mm',
+                right: '8mm',
+                bottom: '8mm',
+                left: '8mm',
             },
         });
 
