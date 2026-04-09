@@ -14,6 +14,17 @@ const policySchema = new mongoose.Schema({
     }
 }, { _id: false });
 
+const socialLinkSchema = new mongoose.Schema({
+    url: {
+        type: String,
+        default: ''
+    },
+    enabled: {
+        type: Boolean,
+        default: false
+    }
+}, { _id: false });
+
 const settingsSchema = new mongoose.Schema({
     // Store Information
     storeName: {
@@ -123,6 +134,36 @@ const settingsSchema = new mongoose.Schema({
     twitterUrl: {
         type: String,
         default: ''
+    },
+    youtubeUrl: {
+        type: String,
+        default: ''
+    },
+    linkedinUrl: {
+        type: String,
+        default: ''
+    },
+    socialLinks: {
+        facebook: {
+            type: socialLinkSchema,
+            default: () => ({ url: '', enabled: false })
+        },
+        instagram: {
+            type: socialLinkSchema,
+            default: () => ({ url: '', enabled: false })
+        },
+        twitter: {
+            type: socialLinkSchema,
+            default: () => ({ url: '', enabled: false })
+        },
+        youtube: {
+            type: socialLinkSchema,
+            default: () => ({ url: '', enabled: false })
+        },
+        linkedin: {
+            type: socialLinkSchema,
+            default: () => ({ url: '', enabled: false })
+        }
     },
 
     // Welcome popup
