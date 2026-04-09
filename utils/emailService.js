@@ -14,7 +14,7 @@ if (process.env.BREVO_API_KEY) {
  * Unified email sender.
  * Priority: Brevo (provided key) -> Mailgun (legacy fallback).
  */
-const sendEmail = async ({ to, subject, html, from, provider = 'auto' }) => {
+const sendEmail = async ({ to, subject, html, from, provider = 'auto', attachments = [] }) => {
     if (!to || !subject || !html) {
         throw new Error('Missing to/subject/html for email');
     }
@@ -33,7 +33,17 @@ const sendEmail = async ({ to, subject, html, from, provider = 'auto' }) => {
                 sender: { email: senderEmail, name: senderName },
                 to: [{ email: to }],
                 subject,
-                htmlContent: html
+                htmlContent: html,
+                ...(attachments.length
+                    ? {
+                        attachment: attachments.map((attachment) => ({
+                            name: attachment.filename,
+                            content: Buffer.isBuffer(attachment.content)
+                                ? attachment.content.toString('base64')
+                                : attachment.content,
+                        })),
+                    }
+                    : {}),
             });
 
             console.log(`✅ Email sent via Brevo to ${to}`);

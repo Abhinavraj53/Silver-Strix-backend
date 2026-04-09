@@ -1,6 +1,157 @@
 const mongoose = require('mongoose');
+const Counter = require('./Counter');
+
+const refundEvidenceSchema = new mongoose.Schema({
+    url: {
+        type: String,
+        required: true
+    },
+    publicId: {
+        type: String,
+        default: null
+    },
+    resourceType: {
+        type: String,
+        enum: ['image', 'video'],
+        default: 'image'
+    },
+    uploadedAt: {
+        type: Date,
+        default: Date.now
+    }
+}, { _id: false });
+
+const refundRequestSchema = new mongoose.Schema({
+    status: {
+        type: String,
+        enum: ['none', 'requested', 'return_approved', 'rejected', 'refund_pending', 'refund_initiated', 'refund_completed', 'refund_rejected'],
+        default: 'none'
+    },
+    requestedAt: {
+        type: Date,
+        default: null
+    },
+    eligibleUntil: {
+        type: Date,
+        default: null
+    },
+    customerMessage: {
+        type: String,
+        default: ''
+    },
+    policyAccepted: {
+        type: Boolean,
+        default: false
+    },
+    evidenceImages: {
+        type: [refundEvidenceSchema],
+        default: []
+    },
+    evidenceVideo: {
+        type: refundEvidenceSchema,
+        default: null
+    },
+    adminDecisionNote: {
+        type: String,
+        default: ''
+    },
+    adminReviewedAt: {
+        type: Date,
+        default: null
+    },
+    adminReviewedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    returnApprovedAt: {
+        type: Date,
+        default: null
+    },
+    returnApprovedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    returnReceivedAt: {
+        type: Date,
+        default: null
+    },
+    returnReceivedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    refundAmount: {
+        type: Number,
+        default: 0
+    },
+    refundNote: {
+        type: String,
+        default: ''
+    },
+    refundApprovedAt: {
+        type: Date,
+        default: null
+    },
+    refundApprovedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    refundInitiatedAt: {
+        type: Date,
+        default: null
+    },
+    refundCompletedAt: {
+        type: Date,
+        default: null
+    },
+    refundRejectedAt: {
+        type: Date,
+        default: null
+    },
+    refundRejectedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    refundReference: {
+        type: String,
+        default: null
+    },
+    refundGatewayProvider: {
+        type: String,
+        enum: ['cashfree', 'manual'],
+        default: null
+    },
+    refundGatewayRefundId: {
+        type: String,
+        default: null
+    },
+    refundGatewayCfRefundId: {
+        type: String,
+        default: null
+    },
+    refundGatewayStatus: {
+        type: String,
+        default: null
+    },
+    refundGatewayResponse: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    }
+}, { _id: false });
 
 const orderSchema = new mongoose.Schema({
+    order_number: {
+        type: String,
+        unique: true,
+        sparse: true,
+        index: true,
+        trim: true,
+        default: null
+    },
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -98,6 +249,10 @@ const orderSchema = new mongoose.Schema({
         enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'],
         default: 'pending'
     },
+    deliveredAt: {
+        type: Date,
+        default: null
+    },
     subtotal: {
         type: Number,
         required: true
@@ -122,6 +277,10 @@ const orderSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    refundRequest: {
+        type: refundRequestSchema,
+        default: () => ({})
+    },
     notes: String,
     createdAt: {
         type: Date,
@@ -136,6 +295,25 @@ const orderSchema = new mongoose.Schema({
 orderSchema.pre('save', function (next) {
     this.updatedAt = Date.now();
     next();
+});
+
+orderSchema.pre('validate', async function (next) {
+    if (!this.isNew || this.order_number) {
+        return next();
+    }
+
+    try {
+        const counter = await Counter.findOneAndUpdate(
+            { key: 'order_number' },
+            { $inc: { value: 1 }, $setOnInsert: { key: 'order_number' } },
+            { new: true, upsert: true }
+        );
+
+        this.order_number = `silverstrix${counter.value}`;
+        next();
+    } catch (error) {
+        next(error);
+    }
 });
 
 module.exports = mongoose.model('Order', orderSchema);

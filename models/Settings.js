@@ -90,6 +90,10 @@ const settingsSchema = new mongoose.Schema({
         type: Number,
         default: 50
     },
+    refundWindowDays: {
+        type: Number,
+        default: 7
+    },
     lowStockThreshold: {
         type: Number,
         default: 10
